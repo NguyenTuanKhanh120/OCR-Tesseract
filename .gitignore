@@ -1,0 +1,32 @@
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Streamlit/runtime artifacts and local OCR runs
+.streamlit/secrets.toml
+.web_runs/
+.web_runtime/
+*.log
+
+# Tesseract language models are downloaded by scripts/setup_tessdata_profiles.ps1
+tessdata/
+tessdata_fast/
+tessdata_best/
+*.traineddata
+*.traineddata.download
+
+# Generated reports and editor/OS files
+comparison_results/
+benchmark_results/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
