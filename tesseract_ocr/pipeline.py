@@ -21,12 +21,11 @@ except ImportError:
     import fitz
 
 from tesseract_ocr.config import TesseractConfig
-from tesseract_ocr.preprocessing import preprocess_image
+from tesseract_ocr.adaptive_background_ocr import run_adaptive_background_ocr
 from tesseract_ocr.scanner import ScannedDocument, scan_input_directory
 from tesseract_ocr.schemas import DocumentResult, PageResult
 from tesseract_ocr.tesseract_engine import (
     render_pdf_page_to_image,
-    run_tesseract_on_image,
     verify_tesseract_environment,
 )
 
@@ -215,16 +214,14 @@ class TesseractPipeline:
             # Render trang thành ảnh ở DPI chỉ định
             img = render_pdf_page_to_image(fitz_page, dpi=self.config.dpi)
 
-            # Tiền xử lý ảnh
-            processed_img, prep_meta = preprocess_image(img, mode=self.config.preprocessing)
-
-            # Chạy Tesseract OCR
-            p_res = run_tesseract_on_image(
-                processed_img,
+            outcome = run_adaptive_background_ocr(
+                img,
                 self.config,
                 page_number=page_num,
-                prep_meta=prep_meta.to_dict(),
+                preprocessing_mode=self.config.preprocessing,
+                enabled=self.config.adaptive_background,
             )
+            p_res = outcome["selected_result"]
             doc_result.pages.append(p_res)
             doc_result.processed_pages = len(doc_result.pages)
 
@@ -251,13 +248,14 @@ class TesseractPipeline:
         if img is None:
             raise ValueError(f"Không thể mở file ảnh: {scanned_doc.path}")
 
-        processed_img, prep_meta = preprocess_image(img, mode=self.config.preprocessing)
-        p_res = run_tesseract_on_image(
-            processed_img,
+        outcome = run_adaptive_background_ocr(
+            img,
             self.config,
             page_number=1,
-            prep_meta=prep_meta.to_dict(),
+            preprocessing_mode=self.config.preprocessing,
+            enabled=self.config.adaptive_background,
         )
+        p_res = outcome["selected_result"]
         doc_result.pages.append(p_res)
         doc_result.processed_pages = 1
 

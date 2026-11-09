@@ -28,6 +28,7 @@ class TesseractConfig:
     tessdata_dir: Optional[Path] = None
     metadata_dir: Optional[Path] = None
     allow_native_text: bool = False
+    adaptive_background: bool = False
     max_documents: Optional[int] = None
     force: bool = False
 
@@ -115,6 +116,7 @@ class TesseractConfig:
             "thresholding_method": self.thresholding_method,
             "tessdata_dir": str(self.tessdata_dir) if self.tessdata_dir else None,
             "allow_native_text": self.allow_native_text,
+            "adaptive_background": self.adaptive_background,
         }
 
     def compute_config_hash(self) -> str:
