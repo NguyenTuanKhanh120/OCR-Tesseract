@@ -23,6 +23,7 @@ except ImportError:
     import fitz
 
 from tesseract_ocr.config import TesseractConfig
+from tesseract_ocr.adaptive_background_ocr import run_adaptive_background_ocr
 from tesseract_ocr.batch_ocr import (
     build_results_zip,
     combine_page_results,
@@ -33,13 +34,11 @@ from tesseract_ocr.insurance_pipeline import (
     STAGE_NAMES,
     run_insurance_region_pipeline,
 )
-from tesseract_ocr.preprocessing import preprocess_image
 from tesseract_ocr.tesseract_engine import (
     find_tesseract_executable,
     find_tessdata_directory,
     get_project_tessdata_profiles,
     render_pdf_page_to_image,
-    run_tesseract_on_image,
     verify_tesseract_environment,
 )
 
@@ -53,6 +52,51 @@ st.set_page_config(
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 WEB_RUNS_DIR = PROJECT_ROOT / ".web_runs"
 INVALID_UPLOAD_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def encode_png_bytes(image: np.ndarray) -> bytes:
+    success, encoded = cv2.imencode(".png", image)
+    if not success:
+        raise RuntimeError("Không thể mã hóa ảnh kết quả để hiển thị")
+    return encoded.tobytes()
+
+
+def decode_png_bytes(payload: bytes) -> np.ndarray:
+    image = cv2.imdecode(np.frombuffer(payload, np.uint8), cv2.IMREAD_UNCHANGED)
+    if image is None:
+        raise RuntimeError("Không thể đọc ảnh kết quả đã lưu")
+    return image
+
+
+def run_page_ocr(
+    raw_image: np.ndarray,
+    config: TesseractConfig,
+    *,
+    page_number: int,
+    prep_mode: str,
+    adaptive_background_enabled: bool,
+    include_display_image: bool,
+) -> dict:
+    outcome = run_adaptive_background_ocr(
+        raw_image,
+        config,
+        page_number=page_number,
+        preprocessing_mode=prep_mode,
+        enabled=adaptive_background_enabled,
+    )
+    result = outcome["selected_result"]
+    record = {
+        "page_number": page_number,
+        "prep_meta": dict(result.preprocessing),
+        "result": result,
+        "selected_variant": outcome["selected_variant"],
+        "candidate_kind": outcome["candidate_kind"],
+        "decision": outcome["decision"],
+        "total_processing_seconds": outcome["processing_seconds"],
+    }
+    if include_display_image:
+        record["selected_image_png"] = encode_png_bytes(outcome["selected_image"])
+    return record
 
 
 def draw_bounding_boxes(image: np.ndarray, boxes: list) -> np.ndarray:
@@ -375,6 +419,7 @@ def multiple_file_ocr_ui(
     prep_profile: str,
     thresholding_method: int,
     model_profile: str,
+    adaptive_background_enabled: bool,
 ) -> None:
     """OCR tuần tự nhiều PDF/ảnh và tạo một TXT riêng cho từng file."""
     output_names = unique_text_filenames([item.name for item in uploaded_files])
@@ -459,6 +504,7 @@ def multiple_file_ocr_ui(
         "preprocessing": prep_profile,
         "thresholding_method": thresholding_method,
         "model_profile": model_profile,
+        "adaptive_background": adaptive_background_enabled,
     }
     run_signature = hashlib.sha256(
         json.dumps(signature_payload, sort_keys=True).encode("utf-8")
@@ -480,6 +526,7 @@ def multiple_file_ocr_ui(
             preprocessing=prep_mode,
             thresholding_method=thresholding_method,
             tessdata_dir=tessdata_dir,
+            adaptive_background=adaptive_background_enabled,
         )
         total_work = sum(spec["total_pages"] for spec in specs)
         completed_work = 0
@@ -505,21 +552,15 @@ def multiple_file_ocr_ui(
                             raw_page = render_pdf_page_to_image(
                                 document[page_index], dpi=dpi
                             )
-                            processed_page, prep_meta = preprocess_image(
-                                raw_page, mode=prep_mode
-                            )
-                            result = run_tesseract_on_image(
-                                processed_page,
-                                config,
-                                page_number=page_number,
-                                prep_meta=prep_meta.to_dict(),
-                            )
                             page_records.append(
-                                {
-                                    "page_number": page_number,
-                                    "prep_meta": prep_meta.to_dict(),
-                                    "result": result,
-                                }
+                                run_page_ocr(
+                                    raw_page,
+                                    config,
+                                    page_number=page_number,
+                                    prep_mode=prep_mode,
+                                    adaptive_background_enabled=adaptive_background_enabled,
+                                    include_display_image=False,
+                                )
                             )
                             completed_work += 1
                             progress.progress(completed_work / total_work)
@@ -531,21 +572,15 @@ def multiple_file_ocr_ui(
                         np.frombuffer(spec["file_bytes"], np.uint8),
                         cv2.IMREAD_COLOR,
                     )
-                    processed_page, prep_meta = preprocess_image(
-                        raw_image, mode=prep_mode
-                    )
-                    result = run_tesseract_on_image(
-                        processed_page,
-                        config,
-                        page_number=1,
-                        prep_meta=prep_meta.to_dict(),
-                    )
                     page_records.append(
-                        {
-                            "page_number": 1,
-                            "prep_meta": prep_meta.to_dict(),
-                            "result": result,
-                        }
+                        run_page_ocr(
+                            raw_image,
+                            config,
+                            page_number=1,
+                            prep_mode=prep_mode,
+                            adaptive_background_enabled=adaptive_background_enabled,
+                            include_display_image=False,
+                        )
                     )
                     completed_work += 1
                     progress.progress(completed_work / total_work)
@@ -664,6 +699,7 @@ def multiple_file_ocr_ui(
                 "Confidence": round(result.confidence * 100, 1),
                 "Số từ": len(result.boxes),
                 "Số ký tự": len(result.text),
+                "Biến thể": record.get("selected_variant", "current"),
             }
         )
     st.dataframe(pd.DataFrame(page_rows), width="stretch", hide_index=True)
@@ -738,6 +774,20 @@ def main():
     prep_mode = "grayscale" if prep_profile == "sauvola" else prep_profile
     thresholding_method = 2 if prep_profile == "sauvola" else 0
     st.sidebar.caption("Khuyến nghị BBGN: best + PSM 6 + Sauvola; DPI 300; lang vie.")
+    adaptive_background_enabled = st.sidebar.checkbox(
+        "Chuẩn hóa nền thông minh (Bước 1-3)",
+        value=False,
+        help=(
+            "Chạy thêm một ứng viên cân bằng sáng hoặc trung hòa nền màu, sau đó "
+            "chỉ chọn ứng viên khi điểm OCR vượt qua guardrail. Tắt để dùng nguyên "
+            "luồng OCR hiện tại."
+        ),
+    )
+    if adaptive_background_enabled:
+        st.sidebar.info(
+            "Chế độ thử nghiệm: có thể chạy tối đa 2 lượt Tesseract mỗi trang; "
+            "ảnh hiện tại được giữ lại nếu ứng viên mới kém hơn."
+        )
 
     tessdata_dir = find_tessdata_directory(profiles[model_profile], tess_exe, required_langs)
     if tessdata_dir:
@@ -776,6 +826,7 @@ def main():
             prep_profile=prep_profile,
             thresholding_method=thresholding_method,
             model_profile=model_profile,
+            adaptive_background_enabled=adaptive_background_enabled,
         )
         return
 
@@ -834,6 +885,7 @@ def main():
         "preprocessing": prep_profile,
         "thresholding_method": thresholding_method,
         "model_profile": model_profile,
+        "adaptive_background": adaptive_background_enabled,
     }
     run_signature = hashlib.sha256(
         json.dumps(signature_payload, sort_keys=True).encode("utf-8")
@@ -854,6 +906,7 @@ def main():
             preprocessing=prep_mode,
             thresholding_method=thresholding_method,
             tessdata_dir=tessdata_dir,
+            adaptive_background=adaptive_background_enabled,
         )
 
         progress = st.progress(0.0)
@@ -872,32 +925,28 @@ def main():
                         f"({position}/{len(page_indices)})..."
                     )
                     raw_page = render_pdf_page_to_image(doc[page_index], dpi=dpi)
-                    processed_page, prep_meta = preprocess_image(raw_page, mode=prep_mode)
-                    result = run_tesseract_on_image(
-                        processed_page,
-                        config,
-                        page_number=actual_page,
-                        prep_meta=prep_meta.to_dict(),
-                    )
                     page_records.append(
-                        {
-                            "page_number": actual_page,
-                            "prep_meta": prep_meta.to_dict(),
-                            "result": result,
-                        }
+                        run_page_ocr(
+                            raw_page,
+                            config,
+                            page_number=actual_page,
+                            prep_mode=prep_mode,
+                            adaptive_background_enabled=adaptive_background_enabled,
+                            include_display_image=True,
+                        )
                     )
                     progress.progress(position / len(page_indices))
         else:
             status_text.info("Đang OCR ảnh...")
-            processed_page, prep_meta = preprocess_image(raw_img, mode=prep_mode)
-            result = run_tesseract_on_image(
-                processed_page,
-                config,
-                page_number=1,
-                prep_meta=prep_meta.to_dict(),
-            )
             page_records.append(
-                {"page_number": 1, "prep_meta": prep_meta.to_dict(), "result": result}
+                run_page_ocr(
+                    raw_img,
+                    config,
+                    page_number=1,
+                    prep_mode=prep_mode,
+                    adaptive_background_enabled=adaptive_background_enabled,
+                    include_display_image=True,
+                )
             )
             progress.progress(1.0)
 
@@ -943,8 +992,13 @@ def main():
     total_words = sum(len(record["result"].boxes) for record in page_records)
     total_chars = sum(len(record["result"].text) for record in page_records)
     total_seconds = sum(
-        record["result"].duration_seconds
-        + float(record["prep_meta"].get("processing_seconds", 0.0))
+        float(
+            record.get(
+                "total_processing_seconds",
+                record["result"].duration_seconds
+                + float(record["prep_meta"].get("processing_seconds", 0.0)),
+            )
+        )
         for record in page_records
     )
     confidence_weight = sum(max(1, len(record["result"].boxes)) for record in page_records)
@@ -971,9 +1025,22 @@ def main():
                 "Confidence": round(record["result"].confidence * 100, 1),
                 "Số từ": len(record["result"].boxes),
                 "Số ký tự": len(record["result"].text),
+                "Biến thể": (
+                    "đã xử lý"
+                    if record.get("selected_variant") == "processed"
+                    else "hiện tại"
+                ),
+                "Lý do chọn": record.get("decision", {}).get("reason", ""),
                 "Thời gian (s)": round(
-                    record["result"].duration_seconds
-                    + float(record["prep_meta"].get("processing_seconds", 0.0)),
+                    float(
+                        record.get(
+                            "total_processing_seconds",
+                            record["result"].duration_seconds
+                            + float(
+                                record["prep_meta"].get("processing_seconds", 0.0)
+                            ),
+                        )
+                    ),
                     2,
                 ),
             }
@@ -1022,7 +1089,7 @@ def main():
                 display_raw = render_pdf_page_to_image(doc[display_page - 1], dpi=dpi)
         else:
             display_raw = raw_img
-        display_processed, _ = preprocess_image(display_raw, mode=prep_mode)
+        display_processed = decode_png_bytes(display_record["selected_image_png"])
 
         st.subheader(f"Bounding Boxes – trang {display_page}")
         annotated = draw_bounding_boxes(display_processed, display_result.boxes)
@@ -1043,7 +1110,12 @@ def main():
             raw_rgb = cv2.cvtColor(display_raw, cv2.COLOR_BGR2RGB)
             st.image(raw_rgb, width="stretch")
         with c2:
-            st.markdown("**Ảnh sau tiền xử lý**")
+            variant_label = (
+                "đã xử lý thông minh"
+                if display_record.get("selected_variant") == "processed"
+                else "pipeline hiện tại"
+            )
+            st.markdown(f"**Ảnh được chọn – {variant_label}**")
             st.image(display_processed, width="stretch")
 
     with tab_pages:

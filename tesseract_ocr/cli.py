@@ -123,6 +123,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cho phép trích xuất native text trong PDF (mặc định tắt để đánh giá đúng OCR engine).",
     )
     parser.add_argument(
+        "--adaptive-background",
+        action="store_true",
+        default=False,
+        help=(
+            "Bật cân bằng sáng/trung hòa nền màu và chọn biến thể bằng guardrail. "
+            "Mặc định tắt để giữ nguyên pipeline cũ."
+        ),
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         default=False,
@@ -166,6 +175,7 @@ def main() -> int:
             tessdata_dir=tessdata_dir,
             metadata_dir=args.metadata_dir,
             allow_native_text=args.allow_native_text,
+            adaptive_background=args.adaptive_background,
             max_documents=args.max_documents,
             force=args.force,
         )
